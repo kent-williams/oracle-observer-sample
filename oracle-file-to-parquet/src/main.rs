@@ -19,7 +19,7 @@ use std::{fs, path::Path, sync::Arc};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    handler().await?;
+    gateway_reward_share_handler().await?;
     Ok(())
 }
 
@@ -27,7 +27,7 @@ fn infos(names: &'static [&str]) -> FileInfoStream {
     futures::stream::iter(names.iter().map(|v| FileInfo::from_str(v))).boxed()
 }
 
-async fn handler() -> Result<Value, Error> {
+async fn gateway_reward_share_handler() -> Result<Value, Error> {
     let path = Path::new("gateway_reward_share_1671643842138.parquet");
 
     let message_type = "
