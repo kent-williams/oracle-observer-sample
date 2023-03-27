@@ -7,22 +7,47 @@ use helium_proto::{
     Message,
 };
 use lambda_runtime::{Error};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{str::FromStr};
 
 use parquet::{
-    data_type::{ByteArray, ByteArrayType, Int64Type, Int32Type},
+    data_type::{ByteArray, ByteArrayType, Int64Type, Int32Type, AsBytes},
     file::{properties::WriterProperties, writer::SerializedFileWriter},
     schema::parser::parse_message_type,
 };
 use std::{fs, path::Path, sync::Arc};
+use aws_sdk_s3 as s3;
+use aws_sdk_s3::types::ByteStream;
+
+#[derive(Deserialize)]
+struct Request {
+    pub body: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SuccessResponse {
+    pub body: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FailureResponse {
+    pub body: String,
+}
+
+// Implement Display for the Failure response so that we can then implement Error.
+impl std::fmt::Display for FailureResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.body)
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // gateway_reward_share_handler().await?;
+    gateway_reward_share_handler().await?;
     // lora_beacon_ingest_report_v1_handler().await?;
     // lora_witness_ingest_report_v1_handler().await?;
-    lora_valid_beacon_report_v1().await?;
+    // lora_valid_beacon_report_v1().await?;
     Ok(())
 }
 
@@ -46,6 +71,9 @@ async fn gateway_reward_share_handler() -> Result<Value, Error> {
     let schema = Arc::new(parse_message_type(message_type).unwrap());
     let props = Arc::new(WriterProperties::builder().build());
     let file = fs::File::create(&path).unwrap();
+
+    // let mut buf = Vec::with_capacity(1024);
+    // let mut buf_ref = buf.as_ptr();
     let mut writer = SerializedFileWriter::new(file, schema, props).unwrap();
     let mut row_group_writer = writer.next_row_group().unwrap();
 
@@ -130,6 +158,38 @@ async fn gateway_reward_share_handler() -> Result<Value, Error> {
 
     row_group_writer.close().unwrap();
     writer.close().unwrap();
+
+    let bucket_name = "oracle-parquet-test";
+    let config = aws_config::load_from_env().await;
+    let s3_client = s3::Client::new(&config);
+
+    let filename = format!("parquet_output_test/test-output.txt");
+    let body = ByteStream::from_path(Path::new("gateway_reward_share_1671643842138.parquet")).await;
+
+    let _ = s3_client
+        .put_object()
+        .bucket(bucket_name)
+        .body(body.unwrap()) //   .as_bytes().to_owned().into())
+        .key(&filename)
+        .content_type("text/plain")
+        .send()
+        .await
+        .map_err(|err| {
+            // In case of failure, log a detailed error to CloudWatch.
+            println!(
+                "failed to upload file '{}' to S3 with error: {}",
+                &filename, err
+            );
+            // The sender of the request receives this message in response.
+            FailureResponse {
+                body: "The lambda encountered an error and your message was not saved".to_owned(),
+            }
+        });
+
+    println!(
+        "Successfully stored the incoming request in S3 with the name '{}'",
+        &filename
+    );
 
     let message = format!("{count} rows of {prefix} processed.");
     Ok(json!({ "message": message }))
