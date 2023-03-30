@@ -17,7 +17,5 @@ sqlx = { version = "0.6", features = [ "runtime-tokio-rustls" , "postgres", "chr
 tokio = { version = "1", features = ["macros"] }
 tokio-util = "0"
 parquet = "34.0.0"
-bytes = "1.4.0"
-bytestream = "0.4.1"
 aws-config = "0.54.1"
 aws-sdk-s3 = "0.24.0"

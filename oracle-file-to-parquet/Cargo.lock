@@ -1254,15 +1254,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bytestream"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04f720842a717d6afaf69fee2dc69b771edc165f12cc3eb1b0e8eeef53a86454"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
 name = "cc"
 version = "1.0.79"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2881,8 +2872,6 @@ dependencies = [
  "anyhow",
  "aws-config 0.54.1",
  "aws-sdk-s3 0.24.0",
- "bytes",
- "bytestream",
  "chrono",
  "file-store",
  "futures",
