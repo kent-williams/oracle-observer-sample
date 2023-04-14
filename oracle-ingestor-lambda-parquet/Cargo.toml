@@ -3,6 +3,9 @@ name = "oracle-ingestor-lambda"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+local = []
+
 [dependencies]
 anyhow = "1"
 chrono = {version = "0", features = ["serde"]}
@@ -19,8 +22,11 @@ tokio-util = "0"
 parquet = "34.0.0"
 aws-sdk-s3 = "0.21"
 aws-config = "0.51"
+aws-types = { version = "0.51", features = ["hardcoded-credentials"], optional = true}
 env_logger = "0.10.0"
 clap = {version = "3", features = ["derive"]}
 config = {version="0", default-features=false, features=["toml"]}
 tracing = "0"
 tracing-subscriber = { version = "0", default-features=false, features = ["env-filter", "registry", "fmt"] }
+http = "*"
+thiserror = "1"

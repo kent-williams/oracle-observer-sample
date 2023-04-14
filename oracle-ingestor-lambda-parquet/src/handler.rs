@@ -1,15 +1,24 @@
 use crate::{settings::Settings, LOADER_WORKERS};
 use anyhow::{Error, Result};
+use aws_config::meta::region::RegionProviderChain;
+use aws_sdk_s3::{types::ByteStream, Client, Credentials, Endpoint, Region};
 use chrono::{DateTime, Utc};
 use file_store::{FileInfo, FileStore, FileType};
 use futures::stream::{self, StreamExt};
 use helium_proto::{services::poc_lora::LoraPocV1, Message};
+use http::Uri;
 use parquet::{
     data_type::{BoolType, ByteArray, ByteArrayType, Int32Type, Int64Type},
     file::{properties::WriterProperties, writer::SerializedFileWriter},
     schema::parser::parse_message_type,
 };
-use std::{fs, path::Path, sync::Arc};
+use std::{fs, path::Path, str::FromStr, sync::Arc};
+
+#[derive(thiserror::Error, Debug)]
+pub enum DecodeError {
+    #[error("uri error")]
+    Uri(#[from] http::uri::InvalidUri),
+}
 
 const BEACON_MSG_TYPE: &str = "
 message schema {
@@ -43,6 +52,7 @@ pub struct Handler {
     store: FileStore,
     mode: Mode,
     settings: Settings,
+    client: Client,
 }
 
 #[derive(Debug)]
@@ -54,10 +64,43 @@ pub enum Mode {
 impl Handler {
     pub async fn new(settings: Settings, mode: Mode) -> Result<Self> {
         let store = FileStore::from_settings(&settings.ingest).await?;
+
+        let endpoint: Option<Endpoint> = match &settings.output_endpoint {
+            Some(endpoint) => Uri::from_str(endpoint)
+                .map(Endpoint::immutable)
+                .map(Some)
+                .map_err(DecodeError::from)?,
+            _ => None,
+        };
+        let region = Region::new(settings.output_region.clone());
+        let region_provider = RegionProviderChain::first_try(region).or_default_provider();
+
+        let mut config = aws_config::from_env().region(region_provider);
+        if let Some(endpoint) = endpoint {
+            config = config.endpoint_resolver(endpoint);
+        }
+
+        #[cfg(feature = "local")]
+        if settings.output_access_key_id.is_some() && settings.output_secret_access_key.is_some() {
+            let creds = Credentials::new(
+                settings.output_access_key_id.clone().unwrap(),
+                settings.output_secret_access_key.clone().unwrap(),
+                None,
+                None,
+                "local",
+            );
+            config = config.credentials_provider(creds);
+        }
+
+        let config = config.load().await;
+
+        let client = Client::new(&config);
+
         Ok(Self {
             store,
             mode,
             settings,
+            client,
         })
     }
 
@@ -68,7 +111,9 @@ impl Handler {
         }
     }
 
-    async fn handle_current(&self, _from_ts: DateTime<Utc>) -> Result<()> {
+    async fn handle_current(&self, from_ts: DateTime<Utc>) -> Result<()> {
+        tracing::debug!("from_ts: {:?}", from_ts);
+
         // TODO
         Ok(())
     }
@@ -90,18 +135,22 @@ impl Handler {
             let stamp = file_info.key.split('.').collect::<Vec<_>>()[1];
             tracing::debug!("parsing iot_poc with timestamp: {:?}", stamp);
 
-            let beacon_file = format!(
-                "/{}/valid_beacons.{}.parquet",
-                self.settings.output_path, stamp
-            );
+            let beacon_file = format!("/{}/valid_beacons.{}.parquet", self.settings.cache, stamp);
             let beacon_path = Path::new(&beacon_file);
-            let witness_file = format!(
-                "/{}/valid_witnesses.{}.parquet",
-                self.settings.output_path, stamp
-            );
+            let witness_file =
+                format!("/{}/valid_witnesses.{}.parquet", self.settings.cache, stamp);
             let witness_path = Path::new(&witness_file);
 
-            write_parquet(self.store.clone(), file_info, beacon_path, witness_path).await?;
+            self.write_parquet(file_info, beacon_path, witness_path)
+                .await?;
+            tracing::debug!("successfully wrote {:?}", beacon_path);
+            tracing::debug!("successfully wrote {:?}", witness_path);
+
+            self.upload_parquet(beacon_path).await?;
+            self.upload_parquet(witness_path).await?;
+
+            self.cleanup_parquet_cache(beacon_path, witness_path)
+                .await?;
 
             Ok::<(), Error>(())
         });
@@ -113,229 +162,275 @@ impl Handler {
 
         Ok(())
     }
-}
 
-async fn write_parquet(
-    store: FileStore,
-    file_info: FileInfo,
-    beacon_path: &Path,
-    witness_path: &Path,
-) -> Result<()> {
-    let mut file_stream = store.get(file_info.key.clone()).await?;
-
-    let beacon_schema = Arc::new(parse_message_type(BEACON_MSG_TYPE)?);
-    let witness_schema = Arc::new(parse_message_type(WITNESS_MSG_TYPE)?);
-    let beacon_props = Arc::new(WriterProperties::builder().build());
-    let witness_props = Arc::new(WriterProperties::builder().build());
-    let beacon_file = fs::File::create(beacon_path)?;
-    let witness_file = fs::File::create(witness_path)?;
-
-    let mut beacon_writer = SerializedFileWriter::new(beacon_file, beacon_schema, beacon_props)?;
-    let mut beacon_row_group_writer = beacon_writer.next_row_group()?;
-
-    let mut witness_writer =
-        SerializedFileWriter::new(witness_file, witness_schema, witness_props)?;
-    let mut witness_row_group_writer = witness_writer.next_row_group()?;
-
-    let mut poc_id: Vec<ByteArray> = Vec::new();
-    let mut ingest_time: Vec<i64> = Vec::new();
-    let mut beacon_location: Vec<i64> = Vec::new();
-    let mut pub_key: Vec<ByteArray> = Vec::new();
-    let mut frequency: Vec<i64> = Vec::new();
-    let mut channel: Vec<i32> = Vec::new();
-    let mut tx_power: Vec<i32> = Vec::new();
-    let mut timestamp: Vec<i64> = Vec::new();
-    let mut tmst: Vec<i32> = Vec::new();
-
-    let mut witness_poc_id: Vec<ByteArray> = Vec::new();
-    let mut witness_pub_key: Vec<ByteArray> = Vec::new();
-    let mut witness_ingest_time: Vec<i64> = Vec::new();
-    let mut witness_location: Vec<i64> = Vec::new();
-    let mut witness_timestamp: Vec<i64> = Vec::new();
-    let mut witness_tmst: Vec<i32> = Vec::new();
-    let mut witness_signal: Vec<i32> = Vec::new();
-    let mut witness_snr: Vec<i32> = Vec::new();
-    let mut witness_frequency: Vec<i64> = Vec::new();
-    let mut selected: Vec<bool> = Vec::new();
-
-    while let Some(result) = file_stream.next().await {
-        let msg = result?;
-        let poc = LoraPocV1::decode(msg)?;
-        if poc.selected_witnesses.is_empty() {
-            continue;
-        }
-        poc_id.push(ByteArray::from(poc.poc_id.clone()));
-        ingest_time.push(poc.beacon_report.clone().unwrap().received_timestamp as i64);
-        beacon_location.push(poc.beacon_report.clone().unwrap().location.parse::<i64>()?);
-        pub_key.push(ByteArray::from(
-            poc.beacon_report.clone().unwrap().report.unwrap().pub_key,
-        ));
-        frequency.push(poc.beacon_report.clone().unwrap().report.unwrap().frequency as i64);
-        channel.push(poc.beacon_report.clone().unwrap().report.unwrap().channel);
-        tx_power.push(poc.beacon_report.clone().unwrap().report.unwrap().tx_power);
-        timestamp.push(poc.beacon_report.clone().unwrap().report.unwrap().timestamp as i64);
-        tmst.push(poc.beacon_report.clone().unwrap().report.unwrap().tmst as i32);
-        for witness in poc.selected_witnesses {
-            witness_poc_id.push(ByteArray::from(poc.poc_id.clone()));
-            witness_pub_key.push(ByteArray::from(witness.report.clone().unwrap().pub_key));
-            witness_ingest_time.push(witness.received_timestamp as i64);
-            witness_location.push(witness.location.parse::<i64>().unwrap_or(0));
-            witness_timestamp.push(witness.report.clone().unwrap().timestamp as i64);
-            witness_tmst.push(witness.report.clone().unwrap().tmst as i32);
-            witness_signal.push(witness.report.clone().unwrap().signal);
-            witness_snr.push(witness.report.clone().unwrap().snr);
-            witness_frequency.push(witness.report.clone().unwrap().frequency as i64);
-            selected.push(true);
-        }
-        for witness in poc.unselected_witnesses {
-            witness_poc_id.push(ByteArray::from(poc.poc_id.clone()));
-            witness_pub_key.push(ByteArray::from(witness.report.clone().unwrap().pub_key));
-            witness_ingest_time.push(witness.received_timestamp as i64);
-            witness_location.push(witness.location.parse::<i64>().unwrap_or(0));
-            witness_timestamp.push(witness.report.clone().unwrap().timestamp as i64);
-            witness_tmst.push(witness.report.clone().unwrap().tmst as i32);
-            witness_signal.push(witness.report.clone().unwrap().signal);
-            witness_snr.push(witness.report.clone().unwrap().snr);
-            witness_frequency.push(witness.report.clone().unwrap().frequency as i64);
-            selected.push(false);
-        }
+    async fn cleanup_parquet_cache(&self, beacon_path: &Path, witness_path: &Path) -> Result<()> {
+        fs::remove_file(beacon_path)?;
+        tracing::debug!("successfully removed tmp {:?}", beacon_path);
+        fs::remove_file(witness_path)?;
+        tracing::debug!("successfully removed tmp {:?}", witness_path);
+        Ok(())
     }
 
-    let mut col_number = 0;
-    while let Some(mut col_writer) = beacon_row_group_writer.next_column()? {
-        col_number += 1;
+    async fn upload_parquet(&self, file_path: &Path) -> Result<()> {
+        if let Some(key) = file_path.file_name() {
+            let body = ByteStream::from_path(file_path).await?;
 
-        match col_number {
-            1 => {
-                col_writer
-                    .typed::<ByteArrayType>()
-                    .write_batch(poc_id.as_slice(), None, None)?;
-            }
-            2 => {
-                col_writer
-                    .typed::<Int64Type>()
-                    .write_batch(ingest_time.as_slice(), None, None)?;
-            }
-            3 => {
-                col_writer.typed::<Int64Type>().write_batch(
-                    beacon_location.as_slice(),
-                    None,
-                    None,
-                )?;
-            }
-            4 => {
-                col_writer
-                    .typed::<ByteArrayType>()
-                    .write_batch(pub_key.as_slice(), None, None)?;
-            }
-            5 => {
-                col_writer
-                    .typed::<Int64Type>()
-                    .write_batch(frequency.as_slice(), None, None)?;
-            }
-            6 => {
-                col_writer
-                    .typed::<Int32Type>()
-                    .write_batch(channel.as_slice(), None, None)?;
-            }
-            7 => {
-                col_writer
-                    .typed::<Int32Type>()
-                    .write_batch(tx_power.as_slice(), None, None)?;
-            }
-            8 => {
-                col_writer
-                    .typed::<Int64Type>()
-                    .write_batch(timestamp.as_slice(), None, None)?;
-            }
-            9 => {
-                col_writer
-                    .typed::<Int32Type>()
-                    .write_batch(tmst.as_slice(), None, None)?;
-            }
-            _e => tracing::warn!("no column match {:?}", _e),
+            self.client
+                .put_object()
+                .bucket(self.settings.output_bucket.clone())
+                .body(body)
+                .key(key.to_str().unwrap())
+                .content_type("text/plain")
+                .send()
+                .await?;
+
+            tracing::debug!(
+                "successfully stored {} in s3 bucket {} ",
+                key.to_str().unwrap(),
+                self.settings.output_bucket
+            );
         }
-        col_writer.close()?;
+
+        Ok(())
     }
 
-    beacon_row_group_writer.close()?;
-    beacon_writer.close()?;
+    async fn write_parquet(
+        &self,
+        file_info: FileInfo,
+        beacon_path: &Path,
+        witness_path: &Path,
+    ) -> Result<()> {
+        let mut file_stream = self.store.get(file_info.key.clone()).await?;
 
-    let mut col_number = 0;
-    while let Some(mut col_writer) = witness_row_group_writer.next_column()? {
-        col_number += 1;
+        let beacon_schema = Arc::new(parse_message_type(BEACON_MSG_TYPE)?);
+        let witness_schema = Arc::new(parse_message_type(WITNESS_MSG_TYPE)?);
+        let beacon_props = Arc::new(WriterProperties::builder().build());
+        let witness_props = Arc::new(WriterProperties::builder().build());
+        let beacon_file = fs::File::create(beacon_path)?;
+        let witness_file = fs::File::create(witness_path)?;
 
-        match col_number {
-            1 => {
-                col_writer.typed::<ByteArrayType>().write_batch(
-                    witness_poc_id.as_slice(),
-                    None,
-                    None,
-                )?;
+        let mut beacon_writer =
+            SerializedFileWriter::new(beacon_file, beacon_schema, beacon_props)?;
+        let mut beacon_row_group_writer = beacon_writer.next_row_group()?;
+
+        let mut witness_writer =
+            SerializedFileWriter::new(witness_file, witness_schema, witness_props)?;
+        let mut witness_row_group_writer = witness_writer.next_row_group()?;
+
+        let mut poc_id: Vec<ByteArray> = Vec::new();
+        let mut ingest_time: Vec<i64> = Vec::new();
+        let mut beacon_location: Vec<i64> = Vec::new();
+        let mut pub_key: Vec<ByteArray> = Vec::new();
+        let mut frequency: Vec<i64> = Vec::new();
+        let mut channel: Vec<i32> = Vec::new();
+        let mut tx_power: Vec<i32> = Vec::new();
+        let mut timestamp: Vec<i64> = Vec::new();
+        let mut tmst: Vec<i32> = Vec::new();
+
+        let mut witness_poc_id: Vec<ByteArray> = Vec::new();
+        let mut witness_pub_key: Vec<ByteArray> = Vec::new();
+        let mut witness_ingest_time: Vec<i64> = Vec::new();
+        let mut witness_location: Vec<i64> = Vec::new();
+        let mut witness_timestamp: Vec<i64> = Vec::new();
+        let mut witness_tmst: Vec<i32> = Vec::new();
+        let mut witness_signal: Vec<i32> = Vec::new();
+        let mut witness_snr: Vec<i32> = Vec::new();
+        let mut witness_frequency: Vec<i64> = Vec::new();
+        let mut selected: Vec<bool> = Vec::new();
+
+        while let Some(result) = file_stream.next().await {
+            let msg = result?;
+            let poc = LoraPocV1::decode(msg)?;
+            if poc.selected_witnesses.is_empty() {
+                continue;
             }
-            2 => {
-                col_writer.typed::<ByteArrayType>().write_batch(
-                    witness_pub_key.as_slice(),
-                    None,
-                    None,
-                )?;
+            poc_id.push(ByteArray::from(poc.poc_id.clone()));
+            ingest_time.push(poc.beacon_report.clone().unwrap().received_timestamp as i64);
+            beacon_location.push(poc.beacon_report.clone().unwrap().location.parse::<i64>()?);
+            pub_key.push(ByteArray::from(
+                poc.beacon_report.clone().unwrap().report.unwrap().pub_key,
+            ));
+            frequency.push(poc.beacon_report.clone().unwrap().report.unwrap().frequency as i64);
+            channel.push(poc.beacon_report.clone().unwrap().report.unwrap().channel);
+            tx_power.push(poc.beacon_report.clone().unwrap().report.unwrap().tx_power);
+            timestamp.push(poc.beacon_report.clone().unwrap().report.unwrap().timestamp as i64);
+            tmst.push(poc.beacon_report.clone().unwrap().report.unwrap().tmst as i32);
+            for witness in poc.selected_witnesses {
+                witness_poc_id.push(ByteArray::from(poc.poc_id.clone()));
+                witness_pub_key.push(ByteArray::from(witness.report.clone().unwrap().pub_key));
+                witness_ingest_time.push(witness.received_timestamp as i64);
+                witness_location.push(witness.location.parse::<i64>().unwrap_or(0));
+                witness_timestamp.push(witness.report.clone().unwrap().timestamp as i64);
+                witness_tmst.push(witness.report.clone().unwrap().tmst as i32);
+                witness_signal.push(witness.report.clone().unwrap().signal);
+                witness_snr.push(witness.report.clone().unwrap().snr);
+                witness_frequency.push(witness.report.clone().unwrap().frequency as i64);
+                selected.push(true);
             }
-            3 => {
-                col_writer.typed::<Int64Type>().write_batch(
-                    witness_ingest_time.as_slice(),
-                    None,
-                    None,
-                )?;
+            for witness in poc.unselected_witnesses {
+                witness_poc_id.push(ByteArray::from(poc.poc_id.clone()));
+                witness_pub_key.push(ByteArray::from(witness.report.clone().unwrap().pub_key));
+                witness_ingest_time.push(witness.received_timestamp as i64);
+                witness_location.push(witness.location.parse::<i64>().unwrap_or(0));
+                witness_timestamp.push(witness.report.clone().unwrap().timestamp as i64);
+                witness_tmst.push(witness.report.clone().unwrap().tmst as i32);
+                witness_signal.push(witness.report.clone().unwrap().signal);
+                witness_snr.push(witness.report.clone().unwrap().snr);
+                witness_frequency.push(witness.report.clone().unwrap().frequency as i64);
+                selected.push(false);
             }
-            4 => {
-                col_writer.typed::<Int64Type>().write_batch(
-                    witness_location.as_slice(),
-                    None,
-                    None,
-                )?;
-            }
-            5 => {
-                col_writer.typed::<Int64Type>().write_batch(
-                    witness_timestamp.as_slice(),
-                    None,
-                    None,
-                )?;
-            }
-            6 => {
-                col_writer
-                    .typed::<Int32Type>()
-                    .write_batch(witness_tmst.as_slice(), None, None)?;
-            }
-            7 => {
-                col_writer.typed::<Int32Type>().write_batch(
-                    witness_signal.as_slice(),
-                    None,
-                    None,
-                )?;
-            }
-            8 => {
-                col_writer
-                    .typed::<Int32Type>()
-                    .write_batch(witness_snr.as_slice(), None, None)?;
-            }
-            9 => {
-                col_writer.typed::<Int64Type>().write_batch(
-                    witness_frequency.as_slice(),
-                    None,
-                    None,
-                )?;
-            }
-            10 => {
-                col_writer
-                    .typed::<BoolType>()
-                    .write_batch(selected.as_slice(), None, None)?;
-            }
-            _e => tracing::warn!("no column match {:?}", _e),
         }
-        col_writer.close()?;
-    }
 
-    witness_row_group_writer.close()?;
-    witness_writer.close()?;
-    Ok(())
+        let mut col_number = 0;
+        while let Some(mut col_writer) = beacon_row_group_writer.next_column()? {
+            col_number += 1;
+
+            match col_number {
+                1 => {
+                    col_writer.typed::<ByteArrayType>().write_batch(
+                        poc_id.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                2 => {
+                    col_writer.typed::<Int64Type>().write_batch(
+                        ingest_time.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                3 => {
+                    col_writer.typed::<Int64Type>().write_batch(
+                        beacon_location.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                4 => {
+                    col_writer.typed::<ByteArrayType>().write_batch(
+                        pub_key.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                5 => {
+                    col_writer.typed::<Int64Type>().write_batch(
+                        frequency.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                6 => {
+                    col_writer
+                        .typed::<Int32Type>()
+                        .write_batch(channel.as_slice(), None, None)?;
+                }
+                7 => {
+                    col_writer
+                        .typed::<Int32Type>()
+                        .write_batch(tx_power.as_slice(), None, None)?;
+                }
+                8 => {
+                    col_writer.typed::<Int64Type>().write_batch(
+                        timestamp.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                9 => {
+                    col_writer
+                        .typed::<Int32Type>()
+                        .write_batch(tmst.as_slice(), None, None)?;
+                }
+                _e => tracing::warn!("no column match {:?}", _e),
+            }
+            col_writer.close()?;
+        }
+
+        beacon_row_group_writer.close()?;
+        beacon_writer.close()?;
+
+        let mut col_number = 0;
+        while let Some(mut col_writer) = witness_row_group_writer.next_column()? {
+            col_number += 1;
+
+            match col_number {
+                1 => {
+                    col_writer.typed::<ByteArrayType>().write_batch(
+                        witness_poc_id.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                2 => {
+                    col_writer.typed::<ByteArrayType>().write_batch(
+                        witness_pub_key.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                3 => {
+                    col_writer.typed::<Int64Type>().write_batch(
+                        witness_ingest_time.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                4 => {
+                    col_writer.typed::<Int64Type>().write_batch(
+                        witness_location.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                5 => {
+                    col_writer.typed::<Int64Type>().write_batch(
+                        witness_timestamp.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                6 => {
+                    col_writer.typed::<Int32Type>().write_batch(
+                        witness_tmst.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                7 => {
+                    col_writer.typed::<Int32Type>().write_batch(
+                        witness_signal.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                8 => {
+                    col_writer.typed::<Int32Type>().write_batch(
+                        witness_snr.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                9 => {
+                    col_writer.typed::<Int64Type>().write_batch(
+                        witness_frequency.as_slice(),
+                        None,
+                        None,
+                    )?;
+                }
+                10 => {
+                    col_writer
+                        .typed::<BoolType>()
+                        .write_batch(selected.as_slice(), None, None)?;
+                }
+                _e => tracing::warn!("no column match {:?}", _e),
+            }
+            col_writer.close()?;
+        }
+
+        witness_row_group_writer.close()?;
+        witness_writer.close()?;
+        Ok(())
+    }
 }

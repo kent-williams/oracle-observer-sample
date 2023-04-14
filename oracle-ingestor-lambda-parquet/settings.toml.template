@@ -1,5 +1,12 @@
-output_path = "/tmp"
+cache = "/tmp"
 log = "oracle_ingestor_lambda=debug"
+output_bucket = "parquet-output"
+output_region = "us-west-2"
+output_endpoint = "http://localhost:9000"
+
+# These are optional and only work with the local feature enabled
+output_access_key_id = "oracleadmin"
+output_secret_access_key = "oracleadmin"
 
 [ingest]
 bucket = "helium-mainnet-iot-verified-rewards"

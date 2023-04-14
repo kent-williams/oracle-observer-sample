@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
-use oracle_ingestor_lambda::{cli::history, settings::Settings};
+use oracle_ingestor_lambda::{
+    cli::{current, history},
+    settings::Settings,
+};
 use serde::Serialize;
 use std::path;
 
@@ -11,15 +14,17 @@ struct FailureResponse {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Cmd {
+    /// Run in historical data gathering mode
     History(history::Cmd),
-    // TODO:
-    // Current(current::Cmd),
+    /// Start from current given timestamp
+    Current(current::Cmd),
 }
 
 impl Cmd {
     pub async fn run(self, settings: Settings) -> Result<()> {
         match self {
             Self::History(cmd) => cmd.run(&settings).await,
+            Self::Current(cmd) => cmd.run(&settings).await,
         }
     }
 }

@@ -5,19 +5,41 @@ use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
+    // Configure logging level = debug
     #[serde(default = "default_log")]
     pub log: String,
+    // Configure ingest file store settings
     pub ingest: FSettings,
-    #[serde(default = "default_output_path")]
-    pub output_path: String,
+    // Configure cache path (tmp store for output parquet files before upload)
+    #[serde(default = "default_cache")]
+    pub cache: String,
+    // Configure output bucket endpoint
+    pub output_endpoint: Option<String>,
+    // Configure output bucket
+    #[serde(default = "default_output_bucket")]
+    pub output_bucket: String,
+    // Configure output region
+    #[serde(default = "default_output_region")]
+    pub output_region: String,
+    #[cfg(feature = "local")]
+    pub output_secret_access_key: Option<String>,
+    pub output_access_key_id: Option<String>,
 }
 
 pub fn default_log() -> String {
     "oracle_ingestor_lambda=debug".to_string()
 }
 
-pub fn default_output_path() -> String {
+pub fn default_cache() -> String {
     "/tmp".to_string()
+}
+
+pub fn default_output_bucket() -> String {
+    "parquet-output".to_string()
+}
+
+pub fn default_output_region() -> String {
+    "us-west-2".to_string()
 }
 
 impl Settings {
