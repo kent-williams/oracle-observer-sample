@@ -17,6 +17,10 @@ sqlx = { version = "0.6", features = [ "runtime-tokio-rustls" , "postgres", "chr
 tokio = { version = "1", features = ["macros"] }
 tokio-util = "0"
 parquet = "34.0.0"
-aws-sdk-s3 = "0.24.0"
-aws-config = "0.54.1"
+aws-sdk-s3 = "0.21"
+aws-config = "0.51"
 env_logger = "0.10.0"
+clap = {version = "3", features = ["derive"]}
+config = {version="0", default-features=false, features=["toml"]}
+tracing = "0"
+tracing-subscriber = { version = "0", default-features=false, features = ["env-filter", "registry", "fmt"] }

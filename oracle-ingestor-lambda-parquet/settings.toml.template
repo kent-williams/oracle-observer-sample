@@ -1,0 +1,6 @@
+output_path = "/tmp"
+log = "oracle_ingestor_lambda=debug"
+
+[ingest]
+bucket = "helium-mainnet-iot-verified-rewards"
+region = "us-west-2"
