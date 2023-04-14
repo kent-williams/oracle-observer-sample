@@ -23,7 +23,10 @@ pub struct Settings {
     pub output_region: String,
     #[cfg(feature = "local")]
     pub output_secret_access_key: Option<String>,
+    #[cfg(feature = "local")]
     pub output_access_key_id: Option<String>,
+    #[cfg(feature = "local")]
+    pub output_session_token: Option<String>,
 }
 
 pub fn default_log() -> String {

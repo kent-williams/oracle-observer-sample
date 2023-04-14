@@ -85,7 +85,7 @@ impl Handler {
             let creds = Credentials::new(
                 settings.output_access_key_id.clone().unwrap(),
                 settings.output_secret_access_key.clone().unwrap(),
-                None,
+                settings.output_session_token.clone(),
                 None,
                 "local",
             );
