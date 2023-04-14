@@ -146,8 +146,8 @@ impl Handler {
             tracing::debug!("successfully wrote {:?}", beacon_path);
             tracing::debug!("successfully wrote {:?}", witness_path);
 
-            self.upload_parquet(beacon_path).await?;
-            self.upload_parquet(witness_path).await?;
+            self.upload_parquet("valid_beacon", beacon_path).await?;
+            self.upload_parquet("valid_witness", witness_path).await?;
 
             self.cleanup_parquet_cache(beacon_path, witness_path)
                 .await?;
@@ -171,24 +171,24 @@ impl Handler {
         Ok(())
     }
 
-    async fn upload_parquet(&self, file_path: &Path) -> Result<()> {
+    async fn upload_parquet(&self, folder_name: &str, file_path: &Path) -> Result<()> {
         if let Some(key) = file_path.file_name() {
             let body = ByteStream::from_path(file_path).await?;
 
-            self.client
-                .put_object()
-                .bucket(self.settings.output_bucket.clone())
-                .body(body)
-                .key(key.to_str().unwrap())
-                .content_type("text/plain")
-                .send()
-                .await?;
+            if let Some(key_str) = key.to_str() {
+                let keyname = format!("{}/{}", folder_name, key_str);
 
-            tracing::debug!(
-                "successfully stored {} in s3 bucket {} ",
-                key.to_str().unwrap(),
-                self.settings.output_bucket
-            );
+                self.client
+                    .put_object()
+                    .bucket(self.settings.output_bucket.clone())
+                    .body(body)
+                    .key(&keyname)
+                    .content_type("text/plain")
+                    .send()
+                    .await?;
+
+                tracing::debug!("successfully stored {} in s3 {}", key_str, keyname);
+            }
         }
 
         Ok(())
