@@ -35,3 +35,12 @@ Once you have completed the above setup steps, you should be copying the relevan
 - **Map File to Proto** - To figure out the mapping of filename to data you should refer to the [oracles repo](https://github.com/helium/oracles). For instance, by viewing the `mobile_rewards` folder we can see that the `radio_reward_share.*` files contain data on RadioRewardShares. We can in turn follow the proto link to figure out the type definition of a RadioRewardShare.
 - **Parse File**: We can then use this mapping of proto to file to decode the given file. In our sample code we for instance run `let reward = RadioRewardShare::decode(msg)?;` in order to read a `radio_reward_share.*` file.
 - **Transform Data**: Once a file is parsed we are then free to convert it to our desired format. In this example we convert the timestamps (in seconds) to dates and convert the hotspot keys from byte arrays to public keys strings.
+
+## Gathering historical iot_poc data to parquet files
+
+- Refer to settings.toml.template and create a new settings.toml file.
+- Execute (changing the before and after as necessary):
+
+```bash
+cargo run --release -- -c settings.toml history --after "2023-04-12T00:00:00" --before "2023-04-13T00:00:00"
+```
