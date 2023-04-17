@@ -28,7 +28,7 @@ impl Cmd {
 
         let handler_mode = Mode::Historical(before_utc, after_utc);
         let handler = Handler::new(settings.clone(), handler_mode).await?;
-        handler.run().await?;
+        handler.run(None).await?;
         Ok(())
     }
 }

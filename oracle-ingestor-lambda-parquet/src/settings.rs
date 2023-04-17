@@ -13,14 +13,14 @@ pub struct Settings {
     // Configure cache path (tmp store for output parquet files before upload)
     #[serde(default = "default_cache")]
     pub cache: String,
-    // Configure output bucket endpoint
-    pub output_endpoint: Option<String>,
     // Configure output bucket
     #[serde(default = "default_output_bucket")]
     pub output_bucket: String,
     // Configure output region
     #[serde(default = "default_output_region")]
     pub output_region: String,
+    // Configure output bucket endpoint
+    pub output_endpoint: Option<String>,
     #[cfg(feature = "local")]
     pub output_secret_access_key: Option<String>,
     #[cfg(feature = "local")]
@@ -38,7 +38,7 @@ pub fn default_cache() -> String {
 }
 
 pub fn default_output_bucket() -> String {
-    "parquet-output".to_string()
+    "oracle-parquet-test".to_string()
 }
 
 pub fn default_output_region() -> String {

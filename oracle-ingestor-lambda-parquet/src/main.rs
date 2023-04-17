@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use anyhow::Result;
 use clap::Parser;
 use oracle_ingestor_lambda::{
@@ -24,7 +25,7 @@ impl Cmd {
     pub async fn run(self, settings: Settings) -> Result<()> {
         match self {
             Self::History(cmd) => cmd.run(&settings).await,
-            Self::Current(cmd) => cmd.run(&settings).await,
+            Self::Current(cmd) => cmd.run(&settings).await.map_err(|e| anyhow!(e)),
         }
     }
 }
@@ -34,8 +35,8 @@ impl Cmd {
 #[clap(about = "Oracles Parquet Parser")]
 pub struct Cli {
     /// Optional configuration file to use. If present the toml file at the
-    /// given path will be loaded. Environemnt variables can override the
-    /// settins in the given file.
+    /// given path will be loaded. Environment variables can override the
+    /// settings in the given file.
     #[clap(short = 'c')]
     config: Option<path::PathBuf>,
 

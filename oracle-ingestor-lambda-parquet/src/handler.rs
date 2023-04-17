@@ -1,17 +1,21 @@
 use crate::{settings::Settings, LOADER_WORKERS};
-use anyhow::{Error, Result};
+use anyhow::{bail, Error, Result};
 use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_s3::{types::ByteStream, Client, Credentials, Endpoint, Region};
+#[cfg(feature = "local")]
+use aws_sdk_s3::Credentials;
+use aws_sdk_s3::{types::ByteStream, Client, Endpoint, Region};
 use chrono::{DateTime, Utc};
-use file_store::{FileInfo, FileStore, FileType};
+use file_store::{BytesMutStream, FileStore, FileType, Settings as FSettings};
 use futures::stream::{self, StreamExt};
 use helium_proto::{services::poc_lora::LoraPocV1, Message};
 use http::Uri;
+use lambda_runtime::LambdaEvent;
 use parquet::{
     data_type::{BoolType, ByteArray, ByteArrayType, Int32Type, Int64Type},
     file::{properties::WriterProperties, writer::SerializedFileWriter},
     schema::parser::parse_message_type,
 };
+use serde_json::Value;
 use std::{fs, path::Path, str::FromStr, sync::Arc};
 
 #[derive(thiserror::Error, Debug)]
@@ -47,7 +51,7 @@ message schema {
     required boolean selected;
 }";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Handler {
     store: FileStore,
     mode: Mode,
@@ -55,7 +59,7 @@ pub struct Handler {
     client: Client,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Mode {
     Historical(DateTime<Utc>, DateTime<Utc>),
     Current(DateTime<Utc>),
@@ -104,17 +108,84 @@ impl Handler {
         })
     }
 
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(&self, event: Option<LambdaEvent<Value>>) -> Result<()> {
         match self.mode {
-            Mode::Current(from_ts) => self.handle_current(from_ts).await,
-            Mode::Historical(before_ts, after_ts) => self.handle_history(before_ts, after_ts).await,
+            Mode::Current(from_ts) => {
+                if let Some(e) = event {
+                    self.handle_current(from_ts, e).await?;
+                } else {
+                    bail!("lambda event not provided")
+                }
+            }
+            Mode::Historical(before_ts, after_ts) => {
+                self.handle_history(before_ts, after_ts).await?
+            }
         }
+        Ok(())
     }
 
-    async fn handle_current(&self, from_ts: DateTime<Utc>) -> Result<()> {
+    async fn handle_current(
+        &self,
+        from_ts: DateTime<Utc>,
+        event: LambdaEvent<Value>,
+    ) -> Result<()> {
         tracing::debug!("from_ts: {:?}", from_ts);
 
-        // TODO
+        // Get the actual event
+        let (event, _context) = event.into_parts();
+        tracing::debug!("event: {:?}", event);
+
+        // Bail if there are no records
+        if event["Records"].is_null() {
+            bail!("Event records are unexpectedly null.");
+        }
+
+        let record = &event["Records"][0];
+        tracing::debug!("record: {:?}", record);
+        let bucket = record["s3"]["bucket"]["name"].clone().to_string();
+        tracing::debug!("bucket: {:?}", bucket);
+        let key = record["s3"]["object"]["key"].clone().to_string();
+        tracing::debug!("key: {:?}", key);
+        let region = record["awsRegion"].clone().to_string();
+        tracing::debug!("region: {:?}", region);
+
+        let settings = &FSettings {
+            region,
+            bucket,
+            endpoint: None,
+            access_key_id: None,
+            secret_access_key: None,
+        };
+
+        let prefix = key.split('.').next().unwrap_or("");
+        tracing::debug!("prefix: {:?}", prefix);
+        let file_type = FileType::from_str(prefix)?;
+        tracing::debug!("file_type: {:?}", file_type);
+
+        if file_type == FileType::IotPoc {
+            let stamp = key.split('.').collect::<Vec<_>>()[1];
+            tracing::debug!("stamp: {:?}", stamp);
+            let beacon_file = format!("/{}/valid_beacons.{}.parquet", self.settings.cache, stamp);
+            let beacon_path = Path::new(&beacon_file);
+            let witness_file =
+                format!("/{}/valid_witnesses.{}.parquet", self.settings.cache, stamp);
+            let witness_path = Path::new(&witness_file);
+
+            let store = FileStore::from_settings(settings).await?;
+            let mut file_stream = store.get(key).await?;
+
+            self.write_parquet(&mut file_stream, beacon_path, witness_path)
+                .await?;
+            tracing::debug!("successfully wrote {:?}", beacon_path);
+            tracing::debug!("successfully wrote {:?}", witness_path);
+
+            self.upload_parquet("valid_beacon", beacon_path).await?;
+            self.upload_parquet("valid_witness", witness_path).await?;
+
+            self.cleanup_parquet_cache(beacon_path, witness_path)
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -141,7 +212,9 @@ impl Handler {
                 format!("/{}/valid_witnesses.{}.parquet", self.settings.cache, stamp);
             let witness_path = Path::new(&witness_file);
 
-            self.write_parquet(file_info, beacon_path, witness_path)
+            let mut file_stream = self.store.get(file_info.key.clone()).await?;
+
+            self.write_parquet(&mut file_stream, beacon_path, witness_path)
                 .await?;
             tracing::debug!("successfully wrote {:?}", beacon_path);
             tracing::debug!("successfully wrote {:?}", witness_path);
@@ -196,12 +269,10 @@ impl Handler {
 
     async fn write_parquet(
         &self,
-        file_info: FileInfo,
+        file_stream: &mut BytesMutStream,
         beacon_path: &Path,
         witness_path: &Path,
     ) -> Result<()> {
-        let mut file_stream = self.store.get(file_info.key.clone()).await?;
-
         let beacon_schema = Arc::new(parse_message_type(BEACON_MSG_TYPE)?);
         let witness_schema = Arc::new(parse_message_type(WITNESS_MSG_TYPE)?);
         let beacon_props = Arc::new(WriterProperties::builder().build());
