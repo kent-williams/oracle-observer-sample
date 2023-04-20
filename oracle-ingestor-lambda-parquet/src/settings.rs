@@ -19,13 +19,13 @@ pub struct Settings {
     // Configure output region
     #[serde(default = "default_output_region")]
     pub output_region: String,
-    // Configure output bucket endpoint
+    // Configure optional output bucket endpoint
     pub output_endpoint: Option<String>,
-    #[cfg(feature = "local")]
+    // Configure optional output_secret_access_key
     pub output_secret_access_key: Option<String>,
-    #[cfg(feature = "local")]
+    // Configure optional output_access_key_id
     pub output_access_key_id: Option<String>,
-    #[cfg(feature = "local")]
+    // Configure optional output_session_token
     pub output_session_token: Option<String>,
 }
 

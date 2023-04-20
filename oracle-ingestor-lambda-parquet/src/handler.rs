@@ -1,9 +1,7 @@
 use crate::{settings::Settings, LOADER_WORKERS};
 use anyhow::{bail, Error, Result};
 use aws_config::meta::region::RegionProviderChain;
-#[cfg(feature = "local")]
-use aws_sdk_s3::Credentials;
-use aws_sdk_s3::{types::ByteStream, Client, Endpoint, Region};
+use aws_sdk_s3::{types::ByteStream, Client, Credentials, Endpoint, Region};
 use chrono::{DateTime, Utc};
 use file_store::{BytesMutStream, FileStore, FileType, Settings as FSettings};
 use futures::stream::{self, StreamExt};
@@ -84,7 +82,6 @@ impl Handler {
             config = config.endpoint_resolver(endpoint);
         }
 
-        #[cfg(feature = "local")]
         if settings.output_access_key_id.is_some() && settings.output_secret_access_key.is_some() {
             let creds = Credentials::new(
                 settings.output_access_key_id.clone().unwrap(),
