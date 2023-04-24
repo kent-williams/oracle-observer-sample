@@ -1,0 +1,13 @@
+cache = "/tmp"
+log = "oracle_ingestor_lambda=debug"
+output_bucket = "oracle-parquet-test"
+output_region = "us-west-2"
+
+# These are optional and only work with local feature
+output_access_key_id=""
+output_secret_access_key=""
+output_session_token=""
+
+[ingest]
+bucket = "helium-mainnet-iot-verified-rewards"
+region = "us-west-2"
